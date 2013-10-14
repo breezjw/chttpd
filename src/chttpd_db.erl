@@ -272,7 +272,26 @@ db_req(#httpd{path_parts=[_,<<"_ensure_full_commit">>]}=Req, _Db) ->
 db_req(#httpd{method='POST',path_parts=[_,<<"_bulk_docs">>], user_ctx=Ctx}=Req, Db) ->
     couch_stats_collector:increment({httpd, bulk_requests}),
     couch_httpd:validate_ctype(Req, "application/json"),
-    {JsonProps} = chttpd:json_body_obj(Req),
+	MaxBulkDocSize = list_to_integer(
+		couch_config:get("couchdb", "max_bulkdoc_size", "4294967296")),
+	{JsonProps} = case couch_httpd:validate_encoding(Req, "gzip") of
+		ok ->
+			QueryBody = couch_httpd:body(Req),
+			couch_httpd:validate_gzip(QueryBody),
+			ISize = couch_httpd:get_gzip_size(QueryBody),
+			case ISize > MaxBulkDocSize of
+			false ->
+				DeCompressBody = zlib:gunzip(QueryBody),
+				?JSON_DECODE(DeCompressBody);
+			true ->
+				throw({not_acceptable, "Exceeding maxmium bulkdoc size (byte): "
+						++ integer_to_list(MaxBulkDocSize)})
+			end;
+		undefined ->
+			chttpd:json_body_obj(Req);
+		_		  ->
+			throw({bad_ctype, "Content-Encoding must be gzip"})
+		end,
     DocsArray = couch_util:get_value(<<"docs">>, JsonProps),
     W = couch_httpd:qs_value(Req, "w", integer_to_list(mem3:quorum(Db))),
     case chttpd:header_value(Req, "X-Couch-Full-Commit") of
